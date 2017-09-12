@@ -1,0 +1,320 @@
+---
+title: 'Final Report of Group 26: Supervised Statistical Learning with 2016 NFL Data
+  Table Fields'
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+---
+
+# Names of students
+
+|     Name     |   NetID  |
+|:------------:|:--------:|
+| Yuming Zhang | yzhan216 |
+|   Rex Zhou   |  rzhou12 |
+|   Wei Zhang  | wzhng100 |
+
+
+# Set up
+```{r, message=FALSE, warning=FALSE}
+# load necessary packages
+library(readr)
+library(caret)
+library(MASS)
+library(gam)
+library(gbm)
+library(rpart)
+library(randomForest)
+library(glmnet)
+library(plyr)
+#library(corrplot)
+library(lattice)
+library(rpart.plot)
+library(klaR)
+
+# define functions needed
+get_best_result = function(caret_fit) {
+  best_result = caret_fit$results[as.numeric(rownames(caret_fit$bestTune)), ]
+  rownames(best_result) = NULL
+  best_result
+}
+```
+
+
+# Introduction
+In this final project, we are going to accomplish the statistical learning task of regression with the dataset called `New_Team.csv`. This dataset includes the performance of each NFL team in 2016. The data comes from Armchair Analysis (http://armchairanalysis.com/), which is a service that provides affordable NFL data for the past 15 years. As our task is regression, we will use `RMSE` as our metric throughout the whole data analysis, which is defined below.
+
+```{r}
+# define "rmse" function
+rmse = function(actual, predicted) {
+  sqrt(mean((actual - predicted) ^ 2))
+}
+```
+
+
+Firstly, let's read in the `New_Team.csv` dataset and have a quick look at how this dataset is like.
+```{r}
+# read in data
+team_data = read_csv("New_Team.csv")
+
+# quick look at the dataset
+dim(team_data)
+head(team_data, 10)
+```
+
+As we can see, the dataset has 8512 observation and 26 variables. Here we list some variables that are of greatest importance for our data analysis later.
+
+| Variable |      Explanation      |
+|:--------:|:---------------------:|
+|    pts   |     Points Scored     |
+|    td    |       Touchdowns      |
+|    fgm   |    Field Goals Made   |
+|    spp   | Successful Pass Plays |
+|    pc    |      Completions      |
+
+For our following data analysis, we will use `pts` as the response variable and select some of the remaining 25 variables as predictors for our methods.
+
+Secondly, we perform the test-train split on the dataset. We will use 60% of the data as our train dataset, and the remaining 40% as our test dataset.
+```{r}
+# test-train split
+set.seed(26)
+pts_idx = createDataPartition(team_data$pts, p = 0.6, list = FALSE)
+pts_trn = team_data[pts_idx,]
+pts_tst = team_data[-pts_idx,]
+```
+
+In order to have a better understanding of the dataset and to find the most significant subset of predictors, we perform some visualization of the dataset.
+```{r}
+histogram(pts_trn$pts, breaks = 20)
+```
+
+The following plots will explore the relationship of the feature variables with the response variable.
+```{r, message=FALSE, warning=FALSE}
+theme1 = trellis.par.get()
+theme1$plot.symbol$col = rgb(.2, .2, .2, .4)
+theme1$plot.symbol$pch = 16
+theme1$plot.line$col = rgb(1, 0, 0, .7)
+theme1$plot.line$lwd = 2
+
+trellis.par.set(theme1)
+
+featurePlot(x = pts_trn[, -2], 
+            y = pts_trn$pts, 
+            plot = "scatter",
+            type = c("p", "smooth"),
+            span = .5,
+            layout = c(5, 1))
+```
+
+From the above plot, we can find many potential predictors, including `dbp`, `dbr`, `drv`, `fgm`, `ir`, `lbp`, `lbr`, `lnr`, `lpc`, `npy`, `pc`, `sfpy`, `sky`, `spp`, `srp`, `td`. So we will need to fit a boosted tree model to further narrow down our subset of predictors.
+
+```{r, message=FALSE, warning=FALSE}
+cv_5 = trainControl(method = "cv", number = 5)
+gbm_grid = expand.grid(interaction.depth = c(1, 2),
+                       n.trees = c(500, 1000, 1500),
+                       shrinkage = c(0.001, 0.01, 0.1),
+                       n.minobsinnode = 10)
+gbm_tune = train(pts ~ ., data = pts_trn,
+                 method = "gbm",
+                 trControl = cv_5,
+                 verbose = FALSE,
+                 tuneGrid = gbm_grid,
+                 preProcess = c("scale"))
+result = summary(gbm_tune)
+result[1:5, ]
+```
+
+The above information shows that `td`, `fgm`, `spp` and `pc` are the best predictors. We will consider these 4 predictors for the following methods.
+
+
+# Methods
+For our data analysis, we will consider the following methods:
+- Linear regression
+- Penalized linear regression (Elastic net)
+- Trees (Random forest)
+- Generalized Additive Models (GAMs)
+
+For each method we will consider different sets of features:
+- `small`: only `td`, `fgm`, `spp` and `pc`
+- `int`: significant interaction between `td`, `fgm`, `spp` and `pc`. That is, `td + fgm + spp + pc + td:spp + fgm:spp + td:pc + fgm:pc`. 
+- `full`: all features
+- `huge`: all features with all possible two way interactions
+
+In particular, for `int`, we fit the linear regression model with all interactions between `td`, `fgm`, `spp` and `pc` to obtain the significant interactions.
+```{r}
+mod = train(pts ~ td * fgm * spp * pc, data = pts_trn, method = "lm", trControl = cv_5)
+summary(mod)
+```
+
+So we select the following significant interactions:  `td:spp`, `fgm:spp`, `td:pc`, `fgm:pc`.
+
+
+## Resampling 
+Throughout the whole data analysis, we will use 5-fold cross-validation resampling method to tune the best model for each method and each set of features.
+
+```{r}
+cv_5 = trainControl(method = "cv", number = 5, verbose = FALSE)
+```
+
+## Linear regression
+
+Linear regression is a linear, parametric, generative method. By 5-fold cross-validation, we can tune the parameters of intercept and all coefficients to reduce the randomness and find the best fitted model.
+
+```{r}
+# lm + small
+lm_small = train(pts ~ td + fgm + spp + pc, 
+                 data = pts_trn, method = "lm", trControl = cv_5)
+
+# lm + int
+lm_int = train(pts ~ td + fgm + spp + pc + td:spp + fgm:spp + td:pc + fgm:pc, 
+               data = pts_trn, method = "lm", trControl = cv_5)
+
+# lm + full
+lm_full = train(pts ~ ., data = pts_trn, method = "lm", trControl = cv_5)
+
+# cv train rmse
+lm_small_trn_rmse = get_best_result(lm_small)$RMSE
+lm_int_trn_rmse = get_best_result(lm_int)$RMSE
+lm_full_trn_rmse = get_best_result(lm_full)$RMSE
+
+# test rmse
+lm_small_tst_rmse = rmse(actual = pts_tst$pts, predicted = predict(lm_small, pts_tst))
+lm_int_tst_rmse = rmse(actual = pts_tst$pts, predicted = predict(lm_int, pts_tst))
+lm_full_tst_rmse = rmse(actual = pts_tst$pts, predicted = predict(lm_full, pts_tst))
+
+```
+
+
+## Penalized linear regression (Elastic net)
+
+Penalized linear regression is a linear, parametric, generative method with shrinkage method elastic net that combines the ridge and lasso methods. The tuning parameters for this method are `alpha` and `lambda`.
+
+```{r}
+# glmnet + small
+glmn_small = train(pts ~ td + fgm + spp + pc, 
+                   data = pts_trn[, -c(1,2)], 
+                   method = "glmnet", 
+                   trControl = cv_5, 
+                   tuneLength = 10)
+
+# glmnet + int
+glmn_int   = train(pts ~ td + fgm + spp + pc + td:spp + fgm:spp + td:pc + fgm:pc, 
+                   data = pts_trn[, -c(1, 2)], 
+                   method = "glmnet", 
+                   trControl = cv_5, 
+                   tuneLength = 10)
+
+# glmnet + full
+glmn_full = train(pts ~ ., data = pts_trn[, -c(1,2)], method = "glmnet", 
+                   trControl = cv_5, tuneLength = 10)
+
+# glmnet + huge
+glmn_huge  = train(pts ~ . ^ 2, data = pts_trn[, -c(1,2)], method = "glmnet", 
+                   trControl = cv_5, tuneLength = 10)
+
+# cv train rmse
+glmn_small_trn_rmse = get_best_result(glmn_small)$RMSE
+glmn_int_trn_rmse = get_best_result(glmn_int)$RMSE
+glmn_full_trn_rmse = get_best_result(glmn_full)$RMSE
+glmn_huge_trn_rmse = get_best_result(glmn_huge)$RMSE
+
+# test rmse
+glmn_small_tst_rmse = rmse(pts_tst$pts, predict(glmn_small, pts_tst))
+glmn_int_tst_rmse = rmse(pts_tst$pts, predict(glmn_int, pts_tst))
+glmn_full_tst_rmse = rmse(pts_tst$pts, predict(glmn_full, pts_tst))
+glmn_huge_tst_rmse = rmse(pts_tst$pts, predict(glmn_huge, pts_tst))
+```
+
+
+## Trees (Random forest)
+
+Tree is a non-linear, non-parametric, discriminative method. There are some ensemble methods of trees including bagging, random forest and boosting. Here we use the ensemble method of random forest. The tuning parameter is `mtry` in this case.
+
+```{r}
+# random forest grid
+rf_grid = expand.grid(mtry = c(1, 2, 3, 4))
+
+# rf + small
+rf_small = train(pts ~ td + fgm + spp + pc, 
+                 data = pts_trn, trControl = cv_5, 
+                 method = "rf", tuneGrid = rf_grid)
+
+# rf + int
+rf_int = train(pts ~ td + fgm + spp + pc + td:spp + fgm:spp + td:pc + fgm:pc, 
+               data = pts_trn, trControl = cv_5, method = "rf", tuneGrid = rf_grid)
+
+# cv train rmse
+rf_small_trn_rmse = get_best_result(rf_small)$RMSE
+rf_int_trn_rmse = get_best_result(rf_int)$RMSE
+
+# test rmse
+rf_small_tst_rmse = rmse(pts_tst$pts, predict(rf_small, pts_tst))
+rf_int_tst_rmse = rmse(pts_tst$pts, predict(rf_int, pts_tst))
+```
+
+
+## Generalized Additive Models (GAMs)
+
+GAMs is a linear, parametric, generative method. The tuning parameter is `degrees of freedom (df)`.
+
+```{r}
+# GAM grid
+gam_grid = expand.grid(df = 1:10)
+
+# GAM + small
+gam_small = train(pts ~ td + fgm + spp + pc, 
+                  data = pts_trn, trControl = cv_5, 
+                  method = "gamSpline", tuneGrid = gam_grid)
+
+# GAM + full
+gam_full = train(pts ~ ., data = pts_trn, trControl = cv_5, 
+                  method = "gamSpline", tuneGrid = gam_grid)
+
+# cv train rmse
+gam_small_trn_rmse = get_best_result(gam_small)$RMSE
+gam_full_trn_rmse = get_best_result(gam_full)$RMSE
+
+# test rmse
+gam_small_tst_rmse = rmse(pts_tst$pts, predict(gam_small, pts_tst))
+gam_full_tst_rmse = rmse(pts_tst$pts, predict(gam_full, pts_tst))
+```
+
+
+# Results
+
+Here we list all models we have used above by increasing test rmse.
+
+|                              | CV RMSE                 | TEST RMSE               |
+|------------------------------|-------------------------|-------------------------|
+| GAM Full Model               | `r gam_full_trn_rmse`   | `r gam_full_tst_rmse`   |
+| Linear Full Model            | `r lm_full_trn_rmse`    | `r lm_full_tst_rmse`    |
+| Elastic Full Model           | `r glmn_full_trn_rmse`  | `r glmn_full_tst_rmse`  |
+| Elastic Huge Model           | `r glmn_huge_trn_rmse`  | `r glmn_huge_tst_rmse`  |
+| Elastic Small Model          | `r glmn_small_trn_rmse` | `r glmn_small_tst_rmse` |
+| Elastic Interact Model       | `r glmn_int_trn_rmse`   | `r glmn_int_tst_rmse`   |
+| Linear Small Model           | `r lm_small_trn_rmse`   | `r lm_small_tst_rmse`   |
+| Linear Interact Model        | `r lm_int_trn_rmse`     | `r lm_int_tst_rmse`     |
+| GAM Small Model              | `r gam_small_trn_rmse`  | `r gam_small_tst_rmse`  |
+| Random Forest Interact Model | `r rf_int_trn_rmse`     | `r rf_int_tst_rmse`     |
+| Random Forest Small Model    | `r rf_small_trn_rmse`   | `r rf_small_tst_rmse`   |
+
+As we can see, with the lowest test rmse among all, GAM full model performs the best among all the models we consider.
+
+```{r}
+gam_full
+get_best_result(gam_full)
+```
+
+# Discussion
+
+## Methods perspective
+
+As we can see from `results`, although GAM full model outperforms the others, generally we can find out that linear methods including linear regression and penalized linear regression (elastic net) outperform non-linear methods like trees. This actually makes sense if we go back to check the feature plot of all variables. From the feature plot, we can see that most of the variables have a somehow linear relationship with the response variable `pts`. So we believe and confirm that indeed, linear methods work better for this dataset. And GAM full model can outperform in this case because it allows for flexible nonlinearities in several variables, but still retains the additive structure of linear models, which matches what we observe from the above plots.
+
+## Features perspective
+
+As we can see from `results`, generally we can see that full model outperforms other models with subsets of features. That is, when we consider all features in the dataset, instead of subsetting only the significant features we observe from the plots, the models will perform better with respect to predictions. 
+
+This actually makes sense if we go back to check the feature plot of all variables. From the feature plot, actually almost all variables somehow contribute to the response variable `pts`, that is, the red lines in the plot are not flat. So we should expect generally full model should outperform other models with subsets of features.
